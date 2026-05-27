@@ -1,0 +1,720 @@
+import base64
+import json
+import re
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Response, UploadFile, status
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.db import SessionLocal, get_db
+from app.models import AnalysisResult, AnalysisRun, Document, OcrResult, User
+from app.schemas import DocumentOcrMockResponse, DocumentParseMockResponse, DocumentParseStatusResponse, DocumentUploadResponse
+from app.services.exam_parser.service import analyze_exam_image
+
+router = APIRouter(prefix="/documents", tags=["documents"])
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+UPLOAD_DIR = BASE_DIR / "uploads"
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+def _parse_json_object(raw: str) -> dict:
+    text_raw = raw.strip()
+    if text_raw.startswith("```"):
+        text_raw = re.sub(r"^```[a-zA-Z]*\s*", "", text_raw)
+        text_raw = re.sub(r"\s*```$", "", text_raw).strip()
+    start = text_raw.find("{")
+    end = text_raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("AI 응답에서 JSON 객체를 찾지 못했습니다.")
+    parsed = json.loads(text_raw[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("AI 응답 JSON 최상위 타입이 object가 아닙니다.")
+    return parsed
+
+
+def _build_parse_overlay_prompt(*, code: str, topic: str, full_text: str) -> str:
+    return f"""You are a world-class English syntax analysis and translation expert AI.
+Your task is to analyze the provided English passage and return a structured JSON object.
+Adhere strictly to the JSON format and analysis rules provided below.
+
+### Analysis Rules:
+1.  **Overall Structure**: The root object must contain `code`, `topic`, `commentary`, `analysis_data`, and `vocabulary`.
+2.  **`topic`**: Read the passage and extract the core topic. You MUST format it exactly as "한글 주제 / English Topic".
+3.  **`commentary`**: Provide a one-sentence summary of the entire passage's core message IN KOREAN.
+4.  **`sentences`**: Split the passage into individual sentences. For each sentence:
+    -   **CRITICAL RULE FOR SPLITTING**: Split the passage into individual sentences strictly based on terminal punctuation (periods `.`, question marks `?`, exclamation marks `!`). NEVER combine two distinct sentences into one.
+    -   Assign a sequential `sentence_no`.
+    -   Provide a natural, full Korean translation in `full_translation`.
+    -   **`is_topic_sentence`**: Always set this value to `false` for now.
+    -   Break the entire sentence down into meaningful `chunks`.
+5.  **`chunks`**: For each chunk:
+    -   **CRITICAL RULE FOR COMPLETENESS**: You MUST analyze every single word of the sentence from the beginning to the very end. DO NOT skip, summarize, or leave out any words, even if the sentence is extremely long.
+    -   **CRITICAL RULE FOR CLAUSES**: NEVER group an entire clause (Noun, Adjective, or Adverbial clause) into a single chunk. You MUST split the clause into separate chunks so that its internal Subject (S) and Verb (V) have their own independent chunks.
+    -   `chunk_id`: A unique integer index starting from 0 for each chunk in the sentence.
+    -   `target_text`: The original English text of the chunk.
+    -   `korean_meaning`: A direct, literal Korean translation of the chunk.
+    -   `syntax_tag`: Assign one of the following tags: S (Subject), V (Verb), O (Object), C (Complement), M (Modifier).
+    -   `box_color`:
+        -   Use "red" for the main Subject (S).
+        -   Use "blue" for the main Verb (V).
+        -   Use "green" for the main Object (O) or Complement (C).
+        -   Leave as null for Modifiers (M).
+    -   `bracket_open` / `bracket_close`:
+        -   Assign `[` to the first chunk of the clause (e.g., the conjunction or relative pronoun).
+        -   Assign `]` to the very last chunk of the clause.
+        -   DO NOT use brackets for simple phrases or other modifiers.
+        -   If multiple clauses end simultaneously, use an array of strings like `["]", "]"]`.
+    -   `grammar_note`: If there's a specific grammatical point worth noting, add a brief explanation IN KOREAN ONLY using Korean grammatical terms (e.g., '과거분사', '관계대명사', '부사절'). Do not use English terms like 'Adverbial Clause'.
+    -   `modifies_chunk_id`: **STRICTLY** set this to an integer `chunk_id` **ONLY** when the current chunk is an adjective or adjective phrase (`M` tag) that directly modifies a preceding noun or noun phrase. For all other cases (adverbial modifiers, etc.), set it to `null`.
+6.  **`vocabulary`**: Extract 3-5 key vocabulary words from the passage and provide their `word` and `meaning` IN KOREAN.
+7.  **JSON Formatting Constraints**: Output MUST be perfectly valid JSON.
+    - **Escape double quotes** inside string values using backslashes (e.g., \\"word\\"). NEVER use single quotes (') to enclose strings, as it violates JSON standards.
+    - **CRITICAL**: You MUST include commas `,` between all elements in arrays (especially between `chunk` objects and `sentence` objects).
+    - Do NOT leave trailing commas at the end of arrays or objects.
+
+### Input Data:
+-   Passage Code: `{code}`
+-   Topic: `{topic}`
+-   Passage Text: `{full_text}`
+
+### Output JSON Format (Strictly follow this schema):
+{{
+  "code": "string",
+  "topic": "한글 주제 / English Topic",
+  "commentary": "string",
+  "analysis_data": {{
+    "sentences": [
+      {{
+        "sentence_no": 1,
+        "full_translation": "string",
+        "is_topic_sentence": false,
+        "chunks": [ ... ]
+      }}
+    ]
+  }},
+  "vocabulary": [ {{ "word": "example", "meaning": "예시" }} ]
+}}
+
+Now, analyze the provided input data and generate the JSON output.
+""".strip()
+
+
+def _validate_overlay_result(parsed: dict) -> dict:
+    analysis_data = parsed.get("analysis_data")
+    if not isinstance(analysis_data, dict) or not isinstance(analysis_data.get("sentences"), list):
+        raise RuntimeError("AI 응답에 analysis_data.sentences가 없습니다.")
+    return parsed
+
+
+def _call_gemini_parse_overlay(*, code: str, topic: str, full_text: str) -> dict:
+    api_key = settings.gemini_api_key.strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY가 비어 있습니다.")
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("google-genai 패키지가 설치되지 않았습니다.") from exc
+
+    prompt = _build_parse_overlay_prompt(code=code, topic=topic, full_text=full_text)
+    try:
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=120000),
+        )
+        response = client.models.generate_content(
+            model=settings.ai_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Gemini 호출 실패: {exc}") from exc
+
+    content = getattr(response, "text", None)
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Gemini 응답 본문이 비어 있습니다.")
+    parsed = _parse_json_object(content)
+    return _validate_overlay_result(parsed)
+
+
+def _call_openrouter_parse_overlay(*, code: str, topic: str, full_text: str) -> dict:
+    api_key = settings.openrouter_api_key.strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY가 비어 있습니다.")
+
+    prompt = _build_parse_overlay_prompt(code=code, topic=topic, full_text=full_text)
+    payload = {
+        "model": settings.ai_model,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    req = urllib.request.Request(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8000",
+            "X-Title": "Capstone Parse API",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else str(exc)
+        raise RuntimeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenRouter 연결 실패: {exc.reason}") from exc
+
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("OpenRouter 응답 구조가 예상과 다릅니다.") from exc
+
+    parsed = _parse_json_object(content)
+    return _validate_overlay_result(parsed)
+
+
+def _call_parse_overlay(*, code: str, topic: str, full_text: str) -> dict:
+    provider = settings.ai_provider.strip().lower()
+    if provider == "gemini":
+        return _call_gemini_parse_overlay(code=code, topic=topic, full_text=full_text)
+    if provider == "openrouter":
+        return _call_openrouter_parse_overlay(code=code, topic=topic, full_text=full_text)
+    raise RuntimeError(f"지원하지 않는 AI_PROVIDER입니다: {settings.ai_provider}")
+
+
+def _save_upload_locally(data: bytes, original_filename: str, suffix: str) -> tuple[str, str]:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(original_filename or "upload").name
+    if Path(safe_name).suffix.lower() != suffix:
+        safe_name = f"{Path(safe_name).stem}{suffix}"
+    filename = f"{uuid4().hex}_{safe_name}"
+    file_path = UPLOAD_DIR / filename
+    file_path.write_bytes(data)
+    storage_key = f"uploads/{filename}"
+    image_url = f"/{storage_key}"
+    return storage_key, image_url
+
+
+def _resolve_upload_path(storage_key: str) -> Path:
+    normalized_key = storage_key.lstrip("/")
+    if not normalized_key.startswith("uploads/"):
+        raise ValueError("unsupported document storage key")
+    path = BASE_DIR / normalized_key
+    if not path.is_file():
+        raise FileNotFoundError("uploaded file not found")
+    return path
+
+
+def _upload_path_for_delete(storage_key: str) -> Path | None:
+    normalized_key = storage_key.lstrip("/")
+    if not normalized_key.startswith("uploads/"):
+        return None
+    path = (BASE_DIR / normalized_key).resolve()
+    upload_root = UPLOAD_DIR.resolve()
+    if not path.is_relative_to(upload_root):
+        return None
+    return path
+
+
+def _time_ago_text(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    now = datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    delta = now - value
+    seconds = max(int(delta.total_seconds()), 0)
+    if seconds < 60:
+        return "방금 전"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}분 전"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}시간 전"
+    days = hours // 24
+    if days < 30:
+        return f"{days}일 전"
+    months = days // 30
+    if months < 12:
+        return f"{months}개월 전"
+    return f"{months // 12}년 전"
+
+
+def _first_ocr_item(ocr_data: object) -> dict:
+    items = _ocr_items(ocr_data)
+    return items[0] if items else {}
+
+
+def _ocr_items(ocr_data: object) -> list[dict]:
+    if not isinstance(ocr_data, dict):
+        return []
+    items = ocr_data.get("items")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return [ocr_data]
+
+
+def _select_ocr_item(ocr_data: object, item_index: int) -> dict:
+    items = _ocr_items(ocr_data)
+    if not items:
+        raise ValueError("ocr result has no items")
+    if item_index < 0 or item_index >= len(items):
+        raise IndexError("ocr item index out of range")
+    return items[item_index]
+
+
+def _row_created_at_iso(row: dict) -> str:
+    created_at = row.get("created_at")
+    return created_at.isoformat() if isinstance(created_at, datetime) else ""
+
+
+def _document_list_dto(row: dict) -> dict:
+    items = _ocr_items(row.get("ocr_data"))
+    ocr_item = items[0] if items else {}
+    category = ocr_item.get("category") if isinstance(ocr_item.get("category"), dict) else {}
+    passage = row.get("full_content") or ""
+    if not passage:
+        content = ocr_item.get("content") if isinstance(ocr_item.get("content"), dict) else {}
+        passage = str(content.get("passage") or "")
+    return {
+        "document_id": row["document_id"],
+        "ocr_result_id": row.get("ocr_result_id"),
+        "title": row.get("title") or "",
+        "status": row.get("status") or "",
+        "category_code": str(category.get("code") or ""),
+        "category_name": str(category.get("name") or "미분류"),
+        "question_number": ocr_item.get("number") if isinstance(ocr_item.get("number"), int) else None,
+        "item_count": len(items),
+        "passage_preview": passage.strip().replace("\n", " ")[:180],
+        "created_at": _row_created_at_iso(row),
+        "time_ago": _time_ago_text(row.get("created_at")),
+    }
+
+
+def _document_detail_dto(row: dict) -> dict:
+    ocr_item = _first_ocr_item(row.get("ocr_data"))
+    category = ocr_item.get("category") if isinstance(ocr_item.get("category"), dict) else {}
+    passage = row.get("full_content") or ""
+    if not passage:
+        content = ocr_item.get("content") if isinstance(ocr_item.get("content"), dict) else {}
+        passage = str(content.get("passage") or "")
+    return {
+        "document_id": row["document_id"],
+        "ocr_result_id": row.get("ocr_result_id"),
+        "title": row.get("title") or "",
+        "status": row.get("status") or "",
+        "category_code": str(category.get("code") or ""),
+        "category_name": str(category.get("name") or "미분류"),
+        "passage": passage.strip(),
+        "items": _ocr_items(row.get("ocr_data")),
+        "created_at": _row_created_at_iso(row),
+        "time_ago": _time_ago_text(row.get("created_at")),
+    }
+
+
+def _run_parse_job(analysis_run_id: int, item_index: int = 0) -> None:
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(AnalysisRun).where(AnalysisRun.id == analysis_run_id))
+        if run is None:
+            return
+
+        print(f"[parse] request started document_id={run.document_id}")
+        db.execute(
+            text(
+                "UPDATE analysis_runs SET status = CAST(:status AS analysis_status), started_at = :started_at, error_message = NULL WHERE id = :run_id"
+            ),
+            {"status": "running", "started_at": datetime.now(timezone.utc), "run_id": analysis_run_id},
+        )
+        db.commit()
+
+        ocr_result = db.scalar(
+            select(OcrResult)
+            .where(OcrResult.id == run.ocr_result_id)
+            .order_by(OcrResult.id.desc())
+        )
+        if ocr_result is None:
+            raise RuntimeError("ocr result not found")
+
+        mock_item = _select_ocr_item(ocr_result.ocr_data, item_index)
+        content = mock_item.get("content", {}) if isinstance(mock_item.get("content", {}), dict) else {}
+        full_text = str(content.get("passage", ocr_result.full_content or "")).strip()
+        instruction = str(content.get("instruction", "")).strip()
+        summary = instruction or "구문 분석 결과"
+        code = str(mock_item.get("code", f"DOC-{run.document_id}"))
+        topic = str((mock_item.get("category") or {}).get("name", "주제 없음"))
+
+        print(f"[parse] calling provider={settings.ai_provider} model={settings.ai_model} document_id={run.document_id}")
+        result_json = _call_parse_overlay(
+            code=code,
+            topic=topic,
+            full_text=full_text,
+        )
+        print(f"[parse] provider call succeeded document_id={run.document_id}")
+
+        existing_result = db.scalar(
+            select(AnalysisResult).where(AnalysisResult.analysis_run_id == analysis_run_id)
+        )
+        if existing_result is None:
+            db.add(
+                AnalysisResult(
+                    analysis_run_id=analysis_run_id,
+                    result_json=result_json,
+                    summary_text=summary,
+                )
+            )
+        else:
+            existing_result.result_json = result_json
+            existing_result.summary_text = summary
+
+        db.execute(
+            text(
+                "UPDATE analysis_runs SET status = CAST(:status AS analysis_status), error_message = NULL, finished_at = :finished_at WHERE id = :run_id"
+            ),
+            {"status": "succeeded", "finished_at": datetime.now(timezone.utc), "run_id": analysis_run_id},
+        )
+        db.commit()
+    except Exception as exc:
+        err = str(exc)
+        print(f"[parse] provider call failed document_id={run.document_id if 'run' in locals() and run is not None else 'unknown'}: {err}")
+        db.execute(
+            text(
+                "UPDATE analysis_runs SET status = CAST(:status AS analysis_status), error_message = :error_message, finished_at = :finished_at WHERE id = :run_id"
+            ),
+            {"status": "failed", "error_message": err, "finished_at": datetime.now(timezone.utc), "run_id": analysis_run_id},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload_document(
+    image: UploadFile = File(...),
+    user_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> DocumentUploadResponse:
+    suffix = Path(image.filename or "").suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported file extension")
+
+    mime_type = image.content_type or ""
+    if mime_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported content type")
+
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="empty file")
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file too large")
+
+    storage_key, image_url = _save_upload_locally(
+        data=data,
+        original_filename=image.filename or f"upload{suffix}",
+        suffix=suffix,
+    )
+
+    owner_user_id = user_id if user_id is not None else 1
+    user = db.scalar(select(User).where(User.id == owner_user_id))
+    if user is None and user_id is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+    if user is None:
+        user = User(
+            id=1,
+            username="tester",
+            email="test@local.dev",
+            password_hash="prototype",
+        )
+        db.add(user)
+        db.flush()
+
+    document = Document(
+        user_id=owner_user_id,
+        title=image.filename or storage_key,
+        storage_key=storage_key,
+        mime_type=mime_type,
+        file_size=len(data),  # type: ignore[arg-type]
+        checksum=sha256(data).hexdigest(),
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    return DocumentUploadResponse(
+        document_id=document.id,
+        user_id=owner_user_id,
+        image_url=image_url,
+    )
+
+
+@router.get("", response_model=list[dict])
+def get_documents(
+    user_id: int = Query(...),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                d.id AS document_id,
+                d.title,
+                d.status,
+                d.created_at,
+                latest_ocr.id AS ocr_result_id,
+                latest_ocr.ocr_data,
+                latest_ocr.full_content
+            FROM documents d
+            LEFT JOIN LATERAL (
+                SELECT id, ocr_data, full_content
+                FROM ocr_results o
+                WHERE o.document_id = d.id AND o.is_latest = true
+                ORDER BY o.created_at DESC
+                LIMIT 1
+            ) latest_ocr ON true
+            WHERE d.user_id = :user_id
+            ORDER BY d.created_at DESC
+            """
+        ),
+        {"user_id": user_id},
+    ).mappings().all()
+    return [_document_list_dto(dict(row)) for row in rows]
+
+
+@router.get("/{document_id}", response_model=dict)
+def get_document_detail(
+    document_id: int,
+    user_id: int = Query(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    row = db.execute(
+        text(
+            """
+            SELECT
+                d.id AS document_id,
+                d.title,
+                d.status,
+                d.created_at,
+                latest_ocr.id AS ocr_result_id,
+                latest_ocr.ocr_data,
+                latest_ocr.full_content
+            FROM documents d
+            LEFT JOIN LATERAL (
+                SELECT id, ocr_data, full_content
+                FROM ocr_results o
+                WHERE o.document_id = d.id AND o.is_latest = true
+                ORDER BY o.created_at DESC
+                LIMIT 1
+            ) latest_ocr ON true
+            WHERE d.id = :document_id AND d.user_id = :user_id
+            LIMIT 1
+            """
+        ),
+        {"document_id": document_id, "user_id": user_id},
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    return _document_detail_dto(dict(row))
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: int,
+    user_id: int = Query(...),
+    db: Session = Depends(get_db),
+) -> Response:
+    document = db.scalar(
+        select(Document).where(
+            Document.id == document_id,
+            Document.user_id == user_id,
+        )
+    )
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+
+    upload_path = _upload_path_for_delete(document.storage_key)
+    db.delete(document)
+    db.commit()
+
+    if upload_path is not None and upload_path.is_file():
+        try:
+            upload_path.unlink()
+        except OSError:
+            pass
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{document_id}/ocr", response_model=DocumentOcrMockResponse)
+def run_ocr_mock(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> DocumentOcrMockResponse:
+    document = db.scalar(select(Document).where(Document.id == document_id))
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+
+    try:
+        upload_path = _resolve_upload_path(document.storage_key)
+        image_base64 = base64.b64encode(upload_path.read_bytes()).decode("utf-8")
+        items = analyze_exam_image(
+            image_base64=image_base64,
+            file_name=document.title or upload_path.name,
+            parse_mode="user",
+        )
+    except Exception as exc:
+        db.execute(
+            text("UPDATE documents SET status = CAST(:status AS document_status) WHERE id = :document_id"),
+            {"status": "ocr_failed", "document_id": document_id},
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    if not items:
+        db.execute(
+            text("UPDATE documents SET status = CAST(:status AS document_status) WHERE id = :document_id"),
+            {"status": "ocr_failed", "document_id": document_id},
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="no questions extracted")
+
+    ocr_item = items[0]
+    content = ocr_item.get("content") if isinstance(ocr_item.get("content"), dict) else {}
+    full_content = str(content.get("passage") or "")
+
+    current_latest = db.scalars(
+        select(OcrResult).where(
+            OcrResult.document_id == document_id,
+            OcrResult.is_latest.is_(True),
+        )
+    ).all()
+    for row in current_latest:
+        row.is_latest = False
+
+    previous_attempt = db.scalar(
+        select(OcrResult.attempt_no)
+        .where(OcrResult.document_id == document_id)
+        .order_by(OcrResult.attempt_no.desc())
+        .limit(1)
+    )
+    attempt_no = (previous_attempt or 0) + 1
+    now = datetime.now(timezone.utc)
+    ocr_result = OcrResult(
+        document_id=document_id,
+        ocr_data={"items": items},
+        full_content=full_content,
+        engine=f"{settings.ai_provider}-exam-parser",
+        attempt_no=attempt_no,
+        is_latest=True,
+        finished_at=now,
+    )
+    db.add(ocr_result)
+    db.flush()
+    db.execute(
+        text("UPDATE ocr_results SET status = CAST(:status AS analysis_status) WHERE id = :ocr_result_id"),
+        {"status": "succeeded", "ocr_result_id": ocr_result.id},
+    )
+    db.execute(
+        text("UPDATE documents SET status = CAST(:status AS document_status) WHERE id = :document_id"),
+        {"status": "ocr_succeeded", "document_id": document_id},
+    )
+    db.commit()
+
+    return DocumentOcrMockResponse(
+        document_id=document_id,
+        status="succeeded",
+        mock_item=ocr_item,
+        items=items,
+    )
+
+
+@router.post(
+    "/{document_id}/parse",
+    response_model=DocumentParseMockResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def run_parse_mock(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    item_index: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> DocumentParseMockResponse:
+    document = db.scalar(select(Document).where(Document.id == document_id))
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+
+    ocr_result = db.scalar(
+        select(OcrResult)
+        .where(OcrResult.document_id == document_id, OcrResult.is_latest.is_(True))
+        .order_by(OcrResult.id.desc())
+    )
+    if ocr_result is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ocr result not found")
+
+    try:
+        _select_ocr_item(ocr_result.ocr_data, item_index)
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    run = AnalysisRun(
+        document_id=document_id,
+        ocr_result_id=ocr_result.id,
+        model_name=settings.ai_model,
+        model_version=settings.ai_provider,
+        prompt_version="react-overlay-v1",
+        input_hash=f"ocr_item_index:{item_index}",
+    )
+    db.add(run)
+    db.flush()
+    db.commit()
+    background_tasks.add_task(_run_parse_job, run.id, item_index)
+
+    return DocumentParseMockResponse(
+        document_id=document_id,
+        analysis_run_id=run.id,
+        status="queued",
+    )
+
+
+@router.get("/{document_id}/parse/{analysis_run_id}", response_model=DocumentParseStatusResponse)
+def get_parse_status(
+    document_id: int,
+    analysis_run_id: int,
+    db: Session = Depends(get_db),
+) -> DocumentParseStatusResponse:
+    run = db.scalar(
+        select(AnalysisRun).where(
+            AnalysisRun.id == analysis_run_id,
+            AnalysisRun.document_id == document_id,
+        )
+    )
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+
+    analysis_result = db.scalar(
+        select(AnalysisResult).where(AnalysisResult.analysis_run_id == analysis_run_id)
+    )
+    return DocumentParseStatusResponse(
+        document_id=document_id,
+        analysis_run_id=analysis_run_id,
+        status=run.status,
+        result_json=analysis_result.result_json if analysis_result is not None else None,
+        error_message=run.error_message,
+    )
