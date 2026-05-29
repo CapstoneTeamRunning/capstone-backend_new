@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .modal_client import ModalClientError, ModalQuestionClient
 from .question_mapper import (
@@ -106,7 +107,9 @@ def create_question_generation_router(
                 requested_type=requested_type,
                 difficulty=requested_difficulty,
             )
-            modal_response = await _maybe_await(modal_client.generate(modal_request))
+            print(f"[generate] calling modal document_id={document_id}", flush=True)
+            modal_response = await run_in_threadpool(modal_client.generate, modal_request)
+            print(f"[generate] modal completed document_id={document_id}", flush=True)
             modal_result = normalize_modal_response(modal_response)
             insert_payload = build_question_insert_payload(
                 ocr_item=ocr_item,

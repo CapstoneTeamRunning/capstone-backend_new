@@ -29,6 +29,15 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class UserStats(Base):
+    __tablename__ = "user_stats"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    total_uploaded_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_generated_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class Post(Base):
     __tablename__ = "posts"
 
@@ -109,7 +118,6 @@ class Question(Base):
     __table_args__ = (
         CheckConstraint("answer IS NULL OR (answer BETWEEN 1 AND 5)", name="ck_questions_answer_range"),
         CheckConstraint("source_type IN ('extracted','generated')", name="ck_questions_source_type"),
-        UniqueConstraint("ocr_result_id", "question_no", name="uq_questions_no_per_ocr"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

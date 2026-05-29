@@ -73,7 +73,7 @@ class QuestionInsertPayload:
     passage: str
     correct_rate: int | None
     raw_json: dict[str, Any]
-    external_code: str
+    external_code: str | None
     module: str | None
 
     def to_dict(self) -> dict[str, Any]:

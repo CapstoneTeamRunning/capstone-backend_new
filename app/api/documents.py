@@ -17,6 +17,7 @@ from app.db import SessionLocal, get_db
 from app.models import AnalysisResult, AnalysisRun, Document, OcrResult, User
 from app.schemas import DocumentOcrMockResponse, DocumentParseMockResponse, DocumentParseStatusResponse, DocumentUploadResponse
 from app.services.exam_parser.service import analyze_exam_image
+from app.services.user_stats import increment_total_uploaded_count
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -455,6 +456,8 @@ async def upload_document(
         checksum=sha256(data).hexdigest(),
     )
     db.add(document)
+    db.flush()
+    increment_total_uploaded_count(db, owner_user_id)
     db.commit()
     db.refresh(document)
 

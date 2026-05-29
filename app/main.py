@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, documents, health, parser, posts, passages, question_generation
+from app.api import auth, documents, exam_sets, health, parser, posts, passages, question_generation, users
 from app.db import Base, engine
 from app.middleware import setup_middleware
 from pathlib import Path
@@ -21,6 +21,8 @@ app.include_router(auth.router)
 app.include_router(posts.router)
 app.include_router(documents.router)
 app.include_router(question_generation.router)
+app.include_router(users.router)
+app.include_router(exam_sets.router)
 app.include_router(parser.router)
 app.include_router(passages.router)
 

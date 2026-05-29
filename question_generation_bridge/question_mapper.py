@@ -46,6 +46,13 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _body_text(result: ModalQuestionResult, key: str) -> str:
+    body_data = result.raw_response.get("body_data")
+    if isinstance(body_data, Mapping):
+        return _text(body_data.get(key))
+    return ""
+
+
 def _get(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
     try:
         return row[key]
@@ -171,6 +178,9 @@ def build_question_insert_payload(
     )
     clean_requested_type = _text(requested_type)
     question_type = clean_requested_type or ocr_item.category_code or "generated"
+    generated_instruction = _body_text(result, "instruction") or ocr_item.instruction
+    generated_passage = _body_text(result, "passage") or ocr_item.source_text
+    generated_category_name = _body_text(result, "type_name") or ocr_item.category_name
     modal_request = build_modal_request(
         ocr_item,
         requested_type=clean_requested_type,
@@ -178,12 +188,12 @@ def build_question_insert_payload(
     )
     body_data = {
         "code": ocr_item.code,
-        "instruction": ocr_item.instruction,
-        "passage": ocr_item.source_text,
+        "instruction": generated_instruction,
+        "passage": generated_passage,
         "requested_type": clean_requested_type,
         "difficulty": requested_difficulty,
         "category_code": ocr_item.category_code,
-        "category_name": ocr_item.category_name,
+        "category_name": generated_category_name,
         "generated": {
             "choices": result.choices,
             "answer": result.answer,
@@ -202,9 +212,9 @@ def build_question_insert_payload(
         source_question_id=source_question_id,
         exam_code=ocr_item.code,
         category_code=ocr_item.category_code,
-        category_name=ocr_item.category_name,
-        instruction=ocr_item.instruction,
-        passage=ocr_item.source_text,
+        category_name=generated_category_name,
+        instruction=generated_instruction,
+        passage=generated_passage,
         correct_rate=None,
         raw_json={
             "requested": {
@@ -215,7 +225,7 @@ def build_question_insert_payload(
             "modal_request": modal_request,
             "modal_response": result.raw_response,
         },
-        external_code=ocr_item.code,
+        external_code=None,
         module=None,
     )
     return payload.to_dict()
