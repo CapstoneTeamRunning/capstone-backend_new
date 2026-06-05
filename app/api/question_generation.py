@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from ast import literal_eval
 from datetime import datetime, timezone
 from typing import Any
@@ -9,10 +10,24 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
-from app.models import OcrResult
+from app.models import Document, OcrResult, User
+from app.api.exam_sets import _exam_code, _is_visible_question, _load_questions
 from app.services.user_stats import increment_total_generated_count
 from question_generation_bridge.modal_client import ModalQuestionClient
-from question_generation_bridge.question_generation import create_question_generation_router
+from question_generation_bridge.question_generation import GenerateQuestionRequest, create_question_generation_router
+from question_generation_bridge.question_mapper import (
+    QuestionMappingError,
+    build_modal_request,
+    build_question_insert_payload,
+    extract_first_ocr_item,
+    normalize_modal_response,
+)
+from question_generation_bridge.modal_client import ModalClientError
+from starlette.concurrency import run_in_threadpool
+
+
+class GenerateExamQuestionRequest(GenerateQuestionRequest):
+    user_id: int
 
 
 def fetch_latest_ocr_result_for_question_generation(document_id: int) -> dict[str, Any] | None:
@@ -28,6 +43,69 @@ def fetch_latest_ocr_result_for_question_generation(document_id: int) -> dict[st
         return {
             "id": ocr_result.id,
             "ocr_result_id": ocr_result.id,
+            "ocr_data": ocr_result.ocr_data,
+        }
+    finally:
+        db.close()
+
+
+def _find_exam_question(exam_code: str, question_no: int) -> dict[str, Any] | None:
+    for item in _load_questions():
+        if (
+            _exam_code(item) == exam_code
+            and int(item.get("number") or 0) == question_no
+            and _is_visible_question(item)
+        ):
+            return deepcopy(item)
+    return None
+
+
+def _create_exam_ocr_result(user_id: int, exam_code: str, exam_item: dict[str, Any]) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.id == user_id))
+        if user is None:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        question_no = int(exam_item.get("number") or 0)
+        content = exam_item.get("content") if isinstance(exam_item.get("content"), dict) else {}
+        full_content = str(content.get("passage") or "")
+        document = Document(
+            user_id=user_id,
+            title=f"{exam_code} {question_no}번",
+            storage_key=f"exam://{exam_code}/{question_no}/{datetime.now(timezone.utc).timestamp()}",
+            mime_type="application/json",
+            file_size=None,
+            checksum=None,
+        )
+        db.add(document)
+        db.flush()
+
+        ocr_result = OcrResult(
+            document_id=document.id,
+            ocr_data={"items": [exam_item]},
+            full_content=full_content,
+            engine="exam-set",
+            attempt_no=1,
+            is_latest=True,
+            finished_at=datetime.now(timezone.utc),
+        )
+        db.add(ocr_result)
+        db.flush()
+        db.execute(
+            text("UPDATE ocr_results SET status = CAST(:status AS analysis_status) WHERE id = :ocr_result_id"),
+            {"status": "succeeded", "ocr_result_id": ocr_result.id},
+        )
+        db.execute(
+            text("UPDATE documents SET status = CAST(:status AS document_status) WHERE id = :document_id"),
+            {"status": "ocr_succeeded", "document_id": document.id},
+        )
+        db.commit()
+
+        return {
+            "id": ocr_result.id,
+            "ocr_result_id": ocr_result.id,
+            "document_id": document.id,
             "ocr_data": ocr_result.ocr_data,
         }
     finally:
@@ -172,6 +250,56 @@ router.include_router(create_question_generation_router(
     insert_question=insert_generated_question_from_modal,
     modal_client=modal_question_client,
 ))
+
+
+@router.post("/exam-sets/{exam_code}/questions/{question_no}/generate")
+async def generate_question_for_exam_question(
+    exam_code: str,
+    question_no: int,
+    request: GenerateExamQuestionRequest,
+) -> dict[str, Any]:
+    exam_item = _find_exam_question(exam_code, question_no)
+    if exam_item is None:
+        raise HTTPException(status_code=404, detail="exam question not found")
+
+    try:
+        requested_type = request.requested_type()
+        if not requested_type:
+            raise QuestionMappingError("type must not be empty")
+        requested_difficulty = request.resolved_difficulty()
+        ocr_result_row = _create_exam_ocr_result(request.user_id, exam_code, exam_item)
+        ocr_item = extract_first_ocr_item(ocr_result_row)
+        modal_request = build_modal_request(
+            ocr_item,
+            requested_type=requested_type,
+            difficulty=requested_difficulty,
+        )
+        print(f"[generate] calling modal exam_code={exam_code} question_no={question_no}", flush=True)
+        modal_response = await run_in_threadpool(modal_question_client.generate, modal_request)
+        print(f"[generate] modal completed exam_code={exam_code} question_no={question_no}", flush=True)
+        modal_result = normalize_modal_response(modal_response)
+        insert_payload = build_question_insert_payload(
+            ocr_item=ocr_item,
+            modal_result=modal_result,
+            requested_type=requested_type,
+            requested_difficulty=requested_difficulty,
+        )
+    except QuestionMappingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ModalClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    inserted = insert_generated_question_from_modal(insert_payload)
+    question_id = inserted.get("id") or inserted.get("question_id") or ""
+    return {
+        "question_id": question_id,
+        "ocr_result_id": insert_payload.get("ocr_result_id", ""),
+        "question_no": insert_payload.get("question_no", ""),
+        "type": insert_payload.get("type", ""),
+        "exam_code": insert_payload.get("exam_code", ""),
+        "instruction": insert_payload.get("instruction", ""),
+        "passage": insert_payload.get("passage", ""),
+    }
 
 
 @router.get("/questions/generated", response_model=list[dict])

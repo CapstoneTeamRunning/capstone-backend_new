@@ -36,6 +36,25 @@ def _is_chart_question(item: dict[str, Any]) -> bool:
     return "도표" in str(category.get("name") or "")
 
 
+def _has_valid_passage(item: dict[str, Any]) -> bool:
+    content = item.get("content")
+    if not isinstance(content, dict):
+        return False
+
+    passage = str(content.get("passage") or "").strip()
+    normalized_passage = re.sub(r"\[[^\]]*\]", " ", passage)
+    normalized_passage = re.sub(r"\s+", " ", normalized_passage).strip()
+    invalid_markers = ("[not parsed]", "들려주는 지문 내용", "지문 내용 없음")
+
+    return len(normalized_passage) >= 120 and not any(
+        marker in passage.lower() for marker in invalid_markers
+    )
+
+
+def _is_visible_question(item: dict[str, Any]) -> bool:
+    return not _is_chart_question(item) and _has_valid_passage(item)
+
+
 def _exam_title(exam_code: str) -> str:
     year, month_code = exam_code.split("-", 1)
     month = "6월" if month_code == "06M" else "9월"
@@ -58,7 +77,7 @@ def _exam_sort_key(exam_code: str) -> tuple[int, int]:
 def get_exam_sets() -> list[dict[str, Any]]:
     grouped: dict[str, int] = {}
     for item in _load_questions():
-        if _is_chart_question(item):
+        if not _is_visible_question(item):
             continue
         exam_code = _exam_code(item)
         if exam_code is not None:
@@ -87,7 +106,7 @@ def get_exam_questions(exam_code: str) -> list[dict[str, Any]]:
         for item in _load_questions()
         if isinstance(item.get("code"), str)
         and item["code"].startswith(prefix)
-        and not _is_chart_question(item)
+        and _is_visible_question(item)
     ]
     if not questions:
         raise HTTPException(status_code=404, detail="exam set not found")

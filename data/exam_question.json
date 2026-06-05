@@ -7,7 +7,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\nDear Ms. Sue Daring,\nMy name is Michael Brown, the president of the Student Council at Brighton High School. I’m writing to ask for your support for our ‘No More Homework’ campaign. As you know, students are under a lot of pressure because of excessive homework. They have no time to develop their talents or do their hobbies. Some students even suffer from stress and health problems. We believe that students should be given more time to spend as they please. That’s why we are running the ‘No More Homework’ campaign. We would appreciate it if you could support our campaign by signing the online petition. Please let me know if you have any questions. Thank you for your time and consideration.\nSincerely,\nMichael Brown\nPresident of the Student Council Brighton High School",
       "choices": [
         {
@@ -2632,7 +2632,7 @@
       "name": "글의 순서"
     },
     "content": {
-      "instruction": "글의 순서",
+      "instruction": "주어진 글 다음에 이어질 글의 순서로 가장 적절한 것을 고르시오.",
       "passage": "[본문]\nTo modern man disease is a biological phenomenon that\nconcerns him only as an individual and has no moral\nimplications. When he contracts influenza, he never\nattributes this event to his behavior toward the tax\ncollector or his mother-in-law.\n\n(A) Sometimes they may not strike the guilty person himself,\nbut rather one of his relatives or tribesmen, to whom\nresponsibility is extended. Disease, action that might\nproduce disease, and recovery from disease are,\ntherefore, of vital concern to the whole primitive\ncommunity.\n(B) Disease, as a sanction against social misbehavior,\nbecomes one of the most important pillars of order in\nsuch societies. It takes over, in many cases, the role\nplayed by policemen, judges, and priests in modern\nsociety.\n(C) Among primitives, because of their supernaturalistic\ntheories, the prevailing moral point of view gives a\ndeeper meaning to disease. The gods who send disease\nare usually angered by the moral offences of the\nindividual.",
       "choices": [
         {
@@ -3927,7 +3927,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\nLet's learn some new skills.\n② I loved taking your craft class.\n③We don't have a community center.\n④ I bought them from an online store.\n5 I want to make curtains for my sister.",
       "choices": [
         {
@@ -4907,7 +4907,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\n[Not Parsed]",
       "choices": [
         {
@@ -11767,7 +11767,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\n[본문]",
       "choices": [
         {
@@ -17647,7 +17647,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\nSorry. I forgot to invite him to my birthday party last week.",
       "choices": [
         {
@@ -18627,7 +18627,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\n(지문 내용 없음)",
       "choices": [
         {
@@ -19292,7 +19292,7 @@
       "name": "글의 순서"
     },
     "content": {
-      "instruction": "글의 순서",
+      "instruction": "주어진 글 다음에 이어질 글의 순서로 가장 적절한 것을 고르시오.",
       "passage": "[본문]\nPlants show finely tuned adaptive responses when nutrients are limiting. Gardeners may recognize yellow leaves as a sign of poor nutrition and the need for fertilizer.\n\n(A) In contrast, plants with a history of nutrient abundance are risk averse and save energy. At all developmental stages, plants respond to environmental changes or unevenness so as to be able to use their energy for growth, survival, and reproduction, while limiting damage and nonproductive uses of their valuable energy.\n\n(B) Research in this area has shown that plants are constantly aware of their position in the environment, in terms of both space and time. Plants that have experienced variable nutrient availability in the past tend to exhibit risk-taking behaviors, such as spending energy on root lengthening instead of leaf production.\n\n(C) But if a plant does not have a caretaker to provide supplemental minerals, it can proliferate or lengthen its roots and develop root hairs to allow foraging in more distant soil patches. Plants can also use their memory to respond to histories of temporal or spatial variation in nutrient or resource availability.",
       "choices": [
         {
@@ -22232,7 +22232,7 @@
       "name": "글의 순서"
     },
     "content": {
-      "instruction": "글의 순서",
+      "instruction": "주어진 글 다음에 이어질 글의 순서로 가장 적절한 것을 고르시오.",
       "passage": "[본문]\nThe generally close connection between health and what\nanimals want exists because wanting to obtain the right\nthings and wanting to avoid the wrong ones are major\nways in which animals keep themselves healthy.\n(A) They can take pre-emptive action so that the worst never\nhappens. They start to want things that will be necessary\nfor their health and survival not for now but for some time\nin the future.\n(B) Animals have evolved many different ways of maintaining\ntheir health and then regaining it again once it has been\ndamaged, such as an ability to heal wounds when they are\ninjured and an amazingly complex immune system for\nwarding off infection.\n(C) Animals are equally good, however, at dealing with injury\nand disease before they even happen. They have evolved\na complex set of mechanisms for anticipating and avoiding\ndanger altogether.",
       "choices": [
         {
@@ -24507,7 +24507,7 @@
       "name": "목적 추론"
     },
     "content": {
-      "instruction": "글의 목적",
+      "instruction": "다음 글의 목적으로 가장 적절한 것은?",
       "passage": "[본문]\nDear Ms. Green,\nI am writing to you to express my concern about the delivery of the book I ordered on June 5th. According to the tracking information I received, the book left the distribution center on June 7th and should have arrived at my address on June 9th. However, today is June 16th, and I have still not received my book.\nI have contacted the delivery company several times, but they have been unable to provide any information about the current location of my book. I am worried that the book may have been lost or stolen during delivery.\nI would like to request that you investigate this matter and take appropriate action to ensure that my book is delivered to me as soon as possible. If the book cannot be found, I would appreciate it if you could send me a replacement free of charge.\nThank you for your time and attention to this matter.\nSincerely,\nThomas Brown",
       "choices": [
         {

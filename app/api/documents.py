@@ -493,6 +493,7 @@ def get_documents(
                 LIMIT 1
             ) latest_ocr ON true
             WHERE d.user_id = :user_id
+              AND d.storage_key NOT LIKE 'exam://%'
             ORDER BY d.created_at DESC
             """
         ),
