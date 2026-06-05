@@ -29,9 +29,12 @@ def _resolve_provider(provider: str | None) -> str:
 def _resolve_model(model: str | None, provider: str) -> str:
     if model:
         return model.strip()
+    configured_model = (settings.ai_model or "").strip()
+    if configured_model:
+        return configured_model
     if provider == "openrouter":
-        return "google/gemini-2.0-flash-001"
-    return settings.ai_model or "gemini-2.0-flash"
+        return "google/gemini-2.5-flash"
+    return "gemini-2.0-flash"
 
 
 def _resolve_api_key(provider: str, api_key: str | None) -> str:

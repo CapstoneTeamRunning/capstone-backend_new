@@ -239,7 +239,7 @@ def insert_generated_question_from_modal(payload: dict[str, Any]) -> dict[str, A
 modal_question_client = ModalQuestionClient(
     os.getenv(
         "MODAL_QUESTION_API_URL",
-        "https://kcy021012--ultra-tuning-question-api-vllm-server-question-api.modal.run",
+        "https://skuld200oow--ultra-tuning-question-api-vllm-server-question-api.modal.run",
     ),
     timeout_seconds=int(os.getenv("MODAL_QUESTION_TIMEOUT_SECONDS", "110")),
 )
