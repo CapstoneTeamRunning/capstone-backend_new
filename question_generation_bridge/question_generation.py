@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .modal_client import ModalClientError, ModalQuestionClient
@@ -30,13 +30,13 @@ InsertQuestion = Callable[[dict[str, Any]], Mapping[str, Any] | int | Awaitable[
 
 class GenerateQuestionRequest(BaseModel):
     type: str
-    difficulty: int = Field(default=DEFAULT_DIFFICULTY, ge=1, le=5)
-    difficult: int | None = Field(default=None, ge=1, le=5)
+    difficulty: int | str = DEFAULT_DIFFICULTY
+    difficult: int | str | None = None
 
     def requested_type(self) -> str:
         return str(self.type or "").strip()
 
-    def resolved_difficulty(self) -> int:
+    def resolved_difficulty(self) -> int | str:
         return self.difficult if self.difficult is not None else self.difficulty
 
 

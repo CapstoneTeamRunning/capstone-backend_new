@@ -239,7 +239,7 @@ def insert_generated_question_from_modal(payload: dict[str, Any]) -> dict[str, A
 modal_question_client = ModalQuestionClient(
     os.getenv(
         "MODAL_QUESTION_API_URL",
-        "https://skuld200oow--ultra-tuning-question-api-vllm-server-question-api.modal.run",
+        "https://kcyoow--ultra-tuning-question-api-vllm-server-question-api.modal.run",
     ),
     timeout_seconds=int(os.getenv("MODAL_QUESTION_TIMEOUT_SECONDS", "110")),
 )
@@ -321,7 +321,7 @@ def get_generated_questions(
                 q.choices,
                 q.answer,
                 q.explanation,
-                NULLIF(q.raw_json #>> '{requested,difficulty}', '')::int AS difficulty,
+                NULLIF(q.raw_json #>> '{requested,difficulty}', '') AS difficulty,
                 q.created_at
             FROM questions q
             JOIN ocr_results o ON o.id = q.ocr_result_id
