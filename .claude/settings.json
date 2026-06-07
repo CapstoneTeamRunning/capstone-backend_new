@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import json; data=json.load\\(open\\('data/exam_question.json', encoding='utf-8'\\)\\); blanks=[q for q in data if '____' in str\\(q.get\\('content',{}\\).get\\('passage',''\\)\\) or '\\( \\)' in str\\(q.get\\('content',{}\\).get\\('passage',''\\)\\)]; print\\(f'빈칸 문제 수: {len\\(blanks\\)}'\\); print\\('첫 번째 예시:'\\); import json; print\\(json.dumps\\(blanks[0], ensure_ascii=False, indent=2\\)[:1500]\\)\")"
+    ]
+  }
+}
